@@ -24,13 +24,15 @@
 **Pravila projekta (iz specifikacije - važe za sav kod):**
 
 1. **Zabranjene biblioteke za serijalizaciju.** Dozvoljeno: `encoding/binary`, `hash/crc32`, `math`, `bytes` i slično što pretvara brojeve u bajtove. Zabranjeno: `encoding/gob`, `encoding/json` (osim za konfiguracioni fajl), protobuf, msgpack i sve slično. Sve binarne formate pišemo ručno.
-2. **Sadržaj fajlova se čita i piše ISKLJUČIVO preko Block managera** (`internal/blokmenadzer`). Izuzeci: učitavanje konfiguracionog fajla i operacije nad fajl-sistemom koje ne čitaju sadržaj (pravljenje direktorijuma, listanje, preimenovanje, brisanje fajla, hard link).
+2. **Sadržaj fajlova se čita i piše ISKLJUČIVO preko Block managera** (`internal/blockmanager`). Izuzeci: učitavanje konfiguracionog fajla i operacije nad fajl-sistemom koje ne čitaju sadržaj (pravljenje direktorijuma, listanje, preimenovanje, brisanje fajla, hard link).
 3. **Ništa se ne učitava ceo u memoriju** gde specifikacija kaže "blok po blok" (WAL, Data, Index, Summary).
 
 **Konvencije koda (dogovor tima):**
 
-- Opisna imena na srpskom (latinica, bez dijakritika): `kljuc`, `vrednost`, `brojac`, `generacija`, `NadjiZapis`. Bez skraćenica tipa `cnt`, `idx`, `tmp`. Domenski pojmovi ostaju kako jesu (`WAL`, `SSTable`, `Memtable`, `Bloom`, `CRC`, `LSM`).
-- Svaka javna funkcija ima komentar: šta radi, šta vraća, kada vraća grešku. Za algoritme koje specifikacija traži da se obrazlože (scan, iteratori, izbor kompresije) komentar objašnjava **zašto** je izabran taj pristup.
+- **Sve što ide u projekat je na engleskom:** imena promenljivih, funkcija, tipova, paketa, foldera i fajlova, poruke koje aplikacija ispisuje, ključevi u `config.json` i putanje na disku.
+- Imena su opisna: `key`, `value`, `counter`, `generation`, `FindRecord`. Bez skraćenica tipa `cnt`, `idx`, `tmp`.
+- Komentari u blokovima koda koje agent daje su na srpskom i služe samo nama za razumevanje - ne prepisujemo ih u projekat. Algoritme koje specifikacija traži da se obrazlože (scan, iteratori, izbor kompresije) opisujemo u `README.md`.
+- Jezik commit poruka i imena grana dogovaramo usput.
 - Svaki paket ima testove (`_test.go`). Pre commit-a: `go vet ./...` i `go test ./...`.
 
 ---
@@ -55,7 +57,7 @@ Memtable → Cache (od ocene 7) → SSTable-ovi od najnovijeg ka najstarijem (od
 
 | Grana | Namena | Ko piše u nju |
 |---|---|---|
-| `main` | Samo stabilne verzije, po jedna za svaku završenu ocenu (tag `ocena-6` … `ocena-10`) | Samo merge iz `develop` preko PR-a |
+| `main` | Samo stabilne verzije, po jedna za svaku završenu ocenu (tagovi `jezgro`, `kes-merkle`, `wal-blokovi`, `lsm-scan`, `kompletno` - vidi sekciju 4) | Samo merge iz `develop` preko PR-a |
 | `develop` | Integraciona grana - ovde se spaja sav završen rad | Samo merge iz `feature/*` i `fix/*` preko PR-a |
 | `feature/<naziv>` | Jedan korak iz sekcije 5 | Vlasnik koraka |
 | `fix/<naziv>` | Ispravka greške | Bilo ko |
@@ -104,8 +106,8 @@ GitHub → Settings → Branches: za `main` i `develop` uključiti "Require a pu
 > Sve u ovoj sekciji dogovaramo u **Fazi 0**, zajedno, pre nego što iko krene na svoj korak. Posle toga je **zamrznuto**: menja se samo dogovorom celog tima i PR-om na ovaj fajl.
 
 Dve odluke donosimo odmah iako trebaju tek za ocenu 10, jer bi ih kasnije bilo skupo uvoditi:
-- **Format zapisa odmah ima polja `Tip` i `Istice`** (za probabilističke tipove, BLOB i TTL) - inače bi se format WAL-a i SSTable-a menjao usred projekta.
-- **Engine od početka podržava keyspace-ove** (`map[string]*Prostor`), sa jednim prostorom `"default"` - inače bi 2.9 bio refaktor celog engine-a.
+- **Format zapisa odmah ima polja `Type` i `ExpiresAt`** (za probabilističke tipove, BLOB i TTL) - inače bi se format WAL-a i SSTable-a menjao usred projekta.
+- **Engine od početka podržava keyspace-ove** (`map[string]*Keyspace`), sa jednim prostorom `"default"` - inače bi 2.9 bio refaktor celog engine-a.
 
 ### 3.1 Struktura repozitorijuma
 
@@ -113,24 +115,24 @@ Dve odluke donosimo odmah iako trebaju tek za ocenu 10, jer bi ih kasnije bilo s
 napredni-algoritmi-projekat/
 ├── cmd/kvengine/main.go          # konzolna aplikacija (CLI petlja, parsiranje komandi)
 ├── internal/
-│   ├── konfiguracija/            # učitavanje config.json + default vrednosti + validacija
-│   ├── zapis/                    # struktura Zapis + binarno kodiranje/dekodiranje (zajedničko!)
-│   ├── blokmenadzer/             # Block manager, block cache, tok bajtova preko blokova
+│   ├── config/                   # učitavanje config.json + default vrednosti + validacija
+│   ├── record/                   # struktura Record + binarno kodiranje/dekodiranje (zajedničko!)
+│   ├── blockmanager/             # Block manager, block cache, tok bajtova preko blokova
 │   ├── lru/                      # generički LRU (koriste ga block cache i cache zapisa)
 │   ├── wal/                      # segmentirani Write-Ahead Log
-│   ├── memtable/                 # interfejs + hashmapa, skiplista, bstablo + menadžer N instanci
+│   ├── memtable/                 # interfejs + hashmap, skiplist, btree + menadžer N instanci
 │   ├── bloomfilter/              # koristi ga SSTable Filter i tip BloomFilter (2.3)
 │   ├── merkle/
-│   ├── kodiranje/                # kompresovani format data bloka (ocena 9)
+│   ├── compression/              # kompresovani format data bloka (ocena 9)
 │   ├── sstable/                  # pisanje/čitanje SSTable-a + iterator
-│   ├── kes/                      # cache zapisa na read path-u (1.5)
+│   ├── cache/                    # cache zapisa na read path-u (1.5)
 │   ├── lsm/                      # nivoi, kompakcije, MANIFEST
-│   ├── iteratori/                # merge iterator, PREFIX/RANGE scan i iterate
+│   ├── iterator/                 # merge iterator, PREFIX/RANGE scan i iterate
 │   ├── tokenbucket/
-│   ├── probabilisticki/          # CountMinSketch, HyperLogLog, SimHash (strukture + komande)
-│   ├── mergeoperatori/           # merge operatori za BF/CMS/HLL (2.3)
+│   ├── probabilistic/            # CountMinSketch, HyperLogLog, SimHash (strukture + komande)
+│   ├── mergeop/                  # merge operatori za BF/CMS/HLL (2.3)
 │   ├── blob/                     # BLOB fajlovi (2.8)
-│   ├── kopije/                   # snapshot, backup, inkrementalni backup, restore (Relja); checkpoint.go (Đole)
+│   ├── copies/                   # snapshot, backup, inkrementalni backup, restore (Relja); checkpoint.go (Đole)
 │   └── engine/                   # spaja sve: read/write path, keyspace-ovi, sistemski ključevi, TTL
 ├── config.json                   # primer konfiguracije sa default vrednostima
 ├── .github/workflows/ci.yml
@@ -142,106 +144,106 @@ Go modul: `github.com/cupinaa/napredni-algoritmi-projekat`
 
 ### 3.2 Format zapisa
 
-**Logički zapis (`internal/zapis`):**
+**Logički zapis (`internal/record`):**
 
 ```go
-type TipZapisa uint8
+type RecordType uint8
 
 const (
-    TipObican         TipZapisa = 0 // obična vrednost
-    TipMergeOperacija TipZapisa = 1 // operacija nad BloomFilter/CMS/HLL instancom (2.3, ocena 10)
-    TipBlobReferenca  TipZapisa = 2 // vrednost je u BLOB fajlu (2.8, ocena 10)
+    TypeRegular        RecordType = 0 // obična vrednost
+    TypeMergeOperation RecordType = 1 // operacija nad BloomFilter/CMS/HLL instancom (2.3, ocena 10)
+    TypeBlobReference  RecordType = 2 // vrednost je u BLOB fajlu (2.8, ocena 10)
 )
 
-type Zapis struct {
-    Kljuc     string
-    Vrednost  []byte
-    Timestamp int64     // time.Now().UnixNano() - nanosekunde, da dva PUT-a u istoj sekundi ne budu izjednačena
+type Record struct {
+    Key       string
+    Value     []byte
+    Timestamp int64      // time.Now().UnixNano() - nanosekunde, da dva PUT-a u istoj sekundi ne budu izjednačena
     Tombstone bool
-    Tip       TipZapisa // do ocene 10 uvek TipObican
-    Istice    int64     // UnixNano kada zapis ističe; 0 = nema TTL (2.7, ocena 10)
+    Type      RecordType // do ocene 10 uvek TypeRegular
+    ExpiresAt int64      // UnixNano kada zapis ističe; 0 = nema TTL (2.7, ocena 10)
 }
 ```
 
-**WAL zapis - osnovni (ocena 6), format sa vežbi 7 proširen sa `Tip` i `Istice`:**
+**WAL zapis - osnovni (ocena 6), format sa vežbi 7 proširen sa `Type` i `ExpiresAt`:**
 
 ```
-+---------+---------------+---------------+---------+-------------+---------------+-----------------+-----+-------+
-| CRC (4B)| Timestamp (8B)| Tombstone (1B)| Tip (1B)| Istice (8B) | Key Size (8B) | Value Size (8B) | Key | Value |
-+---------+---------------+---------------+---------+-------------+---------------+-----------------+-----+-------+
++---------+---------------+---------------+----------+----------------+---------------+-----------------+-----+-------+
+| CRC (4B)| Timestamp (8B)| Tombstone (1B)| Type (1B)| ExpiresAt (8B) | Key Size (8B) | Value Size (8B) | Key | Value |
++---------+---------------+---------------+----------+----------------+---------------+-----------------+-----+-------+
 CRC = crc32.ChecksumIEEE nad svim bajtovima posle CRC polja. Brojevi little-endian (encoding/binary).
 ```
 
-**WAL zapis - blokovski (ocena 8, 1.1[DZ1]):** dodaju se polje **Type** (FULL / FIRST / MIDDLE / LAST) za fragmentaciju korisničkog zapisa preko granica blokova, **padding** do kraja bloka i **trailing canary** polje na kraju svakog zapisa. Tačan raspored Aleksa upisuje ovde kad dođe do tog koraka.
+**WAL zapis - blokovski (ocena 8, 1.1[DZ1]):** dodaje se polje **FragmentType** (FULL / FIRST / MIDDLE / LAST) za fragmentaciju korisničkog zapisa preko granica blokova, **padding** do kraja bloka i **trailing canary** polje na kraju svakog zapisa. Tačan raspored Aleksa upisuje ovde kad dođe do tog koraka.
 
-**SSTable Data zapis:** do ocene 9 isti raspored polja kao osnovni WAL zapis. Od ocene 9 (1.3[DZ3]) prelazi na kompresovani format iz paketa `kodiranje` (varint, delta ključeva, dictionary/bit packing) - Aleksa upisuje raspored ovde. Da bi ta zamena bila mala, **SSTable kodira i dekodira zapise na jednom mestu** (jedna funkcija za upis, jedna za čitanje) - u ocenu 9 se menja samo to mesto.
+**SSTable Data zapis:** do ocene 9 isti raspored polja kao osnovni WAL zapis. Od ocene 9 (1.3[DZ3]) prelazi na kompresovani format iz paketa `compression` (varint, delta ključeva, dictionary/bit packing) - Aleksa upisuje raspored ovde. Da bi ta zamena bila mala, **SSTable kodira i dekodira zapise na jednom mestu** (jedna funkcija za upis, jedna za čitanje) - u ocenu 9 se menja samo to mesto.
 
 ### 3.3 Interfejsi između komponenti
 
 Potpisi koje svi poštuju. Metode označene sa (ocena N) dodaju se kad se dođe do tog koraka.
 
 ```go
-// internal/blokmenadzer
-type BlokMenadzer interface {
-    CitajBlok(putanja string, redniBroj uint64) ([]byte, error)          // prvo block cache, pa disk
-    PisiBlok(putanja string, redniBroj uint64, sadrzaj []byte) error     // disk + ažurira cache ako je blok tu
-    BrojBlokova(putanja string) (uint64, error)
-    Sinhronizuj(putanja string) error                                    // fdatasync / File.Sync (ocena 8)
-    VelicinaBloka() int
+// internal/blockmanager
+type BlockManager interface {
+    ReadBlock(path string, blockIndex uint64) ([]byte, error)        // prvo block cache, pa disk
+    WriteBlock(path string, blockIndex uint64, data []byte) error    // disk + ažurira cache ako je blok tu
+    BlockCount(path string) (uint64, error)
+    Sync(path string) error                                          // fdatasync / File.Sync (ocena 8)
+    BlockSize() int
 }
 
 // Pomoćni sloj (isti paket): niz bajtova proizvoljne dužine preko blokova.
 // SSTable i WAL ga koriste da ne bi svako sam računao granice blokova.
-type PisacToka interface {
-    Upisi(podaci []byte) (pocetniOffset uint64, err error)
-    Zavrsi() error // dopuni poslednji blok i upiše ga
+type StreamWriter interface {
+    Write(data []byte) (startOffset uint64, err error)
+    Finish() error // dopuni poslednji blok i upiše ga
 }
-type CitacToka interface {
-    ProcitajNa(offset uint64, duzina uint64) ([]byte, error) // čita samo blokove koji pokrivaju traženi opseg
+type StreamReader interface {
+    ReadAt(offset uint64, length uint64) ([]byte, error) // čita samo blokove koji pokrivaju traženi opseg
 }
 
 // internal/memtable
 type Memtable interface {
-    Dodaj(z zapis.Zapis)                       // PUT i DELETE (tombstone); isti ključ = prepisivanje
-    Nadji(kljuc string) (zapis.Zapis, bool)   // vraća i tombstone zapise - engine odlučuje šta znače
-    BrojElemenata() int
-    ZauzeceBajtova() int
-    SortiraniZapisi() []zapis.Zapis           // za flush, rastuće po ključu
-    Iterator(odKljuca string) Iterator         // (ocena 9) za scan i iteratore
+    Put(r record.Record)                      // PUT i DELETE (tombstone); isti ključ = prepisivanje
+    Get(key string) (record.Record, bool)     // vraća i tombstone zapise - engine odlučuje šta znače
+    Count() int
+    SizeBytes() int
+    SortedRecords() []record.Record           // za flush, rastuće po ključu
+    Iterator(fromKey string) Iterator         // (ocena 9) za scan i iteratore
 }
 
 // internal/wal
 type WAL interface {
-    Dodaj(zapisi ...zapis.Zapis) (redniBrojSegmenta uint64, err error) // vraća tek kad je na disku; više zapisa = atomičan batch (ocena 10)
-    Procitaj(posetilac func(z zapis.Zapis) error) error                // blok po blok, proverava CRC
-    ObrisiSegmenteDo(niskaVoda uint64) error                           // briše segmente čiji su zapisi već u SSTable-u
+    Append(records ...record.Record) (segmentIndex uint64, err error) // vraća tek kad je na disku; više zapisa = atomičan batch (ocena 10)
+    Read(visit func(r record.Record) error) error                     // blok po blok, proverava CRC
+    DeleteSegmentsUpTo(lowWaterMark uint64) error                     // briše segmente čiji su zapisi već u SSTable-u
 }
 
 // internal/sstable
-func Napravi(bm blokmenadzer.BlokMenadzer, direktorijum string, generacija uint64,
-    zapisi []zapis.Zapis, opcije Opcije) (*Tabela, error)
-func Otvori(bm blokmenadzer.BlokMenadzer, direktorijum string, generacija uint64) (*Tabela, error)
-func (t *Tabela) Nadji(kljuc string) (zapis.Zapis, bool, error)   // Bloom → Summary → Index → Data
-func (t *Tabela) Validiraj() (izmenjeniZapisi []int, err error)    // (ocena 7) Merkle provera
-func (t *Tabela) Iterator(odKljuca string) (Iterator, error)      // (ocena 8) blok po blok
+func Create(bm blockmanager.BlockManager, dir string, generation uint64,
+    records []record.Record, options Options) (*Table, error)
+func Open(bm blockmanager.BlockManager, dir string, generation uint64) (*Table, error)
+func (t *Table) Get(key string) (record.Record, bool, error)   // Bloom → Summary → Index → Data
+func (t *Table) Validate() (changedRecords []int, err error)    // (ocena 7) Merkle provera
+func (t *Table) Iterator(fromKey string) (Iterator, error)      // (ocena 8) blok po blok
 
 // Zajednički iterator (memtable, sstable, merge iterator)
 type Iterator interface {
-    Sledeci() (zapis.Zapis, bool, error)
-    Zatvori() error
+    Next() (record.Record, bool, error)
+    Close() error
 }
 
 // internal/lru (generički)
-func Novi[K comparable, V any](kapacitet int) *LRU[K, V]
-func (l *LRU[K, V]) Uzmi(kljuc K) (V, bool)
-func (l *LRU[K, V]) Stavi(kljuc K, vrednost V)
-func (l *LRU[K, V]) Izbaci(kljuc K)
+func New[K comparable, V any](capacity int) *LRU[K, V]
+func (l *LRU[K, V]) Get(key K) (V, bool)
+func (l *LRU[K, V]) Put(key K, value V)
+func (l *LRU[K, V]) Remove(key K)
 
 // internal/engine
-type Engine struct { /* map[string]*Prostor - jedan Prostor po keyspace-u */ }
-func (e *Engine) Put(prostor, kljuc string, vrednost []byte) error
-func (e *Engine) Get(prostor, kljuc string) ([]byte, bool, error)
-func (e *Engine) Delete(prostor, kljuc string) error
+type Engine struct { /* map[string]*Keyspace - jedan Keyspace po keyspace-u */ }
+func (e *Engine) Put(keyspace, key string, value []byte) error
+func (e *Engine) Get(keyspace, key string) ([]byte, bool, error)
+func (e *Engine) Delete(keyspace, key string) error
 ```
 
 **Sistemski ključevi** (token bucket 2.2, probabilistički tipovi 2.3): čuvaju se kao obični zapisi sa prefiksom `"\x00sys/"`. Engine odbija svaku korisničku PUT/GET/DELETE operaciju nad ključem koji počinje sa `"\x00"`, a scan/iterate ih preskaču.
@@ -249,17 +251,17 @@ func (e *Engine) Delete(prostor, kljuc string) error
 ### 3.4 Fajlovi na disku
 
 ```
-podaci/
+data/
 └── <keyspace>/                   # "default" dok se ne uvedu keyspace-ovi
     ├── wal/wal_0001.log, wal_0002.log, ...
     ├── sstable/usertable-<GEN>-<ELEMENT>.db     # ELEMENT: Data, Filter, Index, Summary, Metadata
     │          usertable-<GEN>-TOC.txt           # spisak elemenata tabele (vežbe 9)
     ├── blob/                     # ocena 10
     └── MANIFEST-<n>              # ocena 10
-checkpoint/<ime>/   backup/<ime>/
+checkpoint/<name>/   backup/<name>/
 ```
 
-`GEN` je redni broj koji raste sa svakom novom tabelom (nikad se ne ponavlja). Nivo LSM-a se do MANIFEST-a piše u imenu (`usertable-<GEN>-L<nivo>-Data.db`), a od MANIFEST-a se vodi u njemu.
+`GEN` je redni broj koji raste sa svakom novom tabelom (nikad se ne ponavlja). Nivo LSM-a se do MANIFEST-a piše u imenu (`usertable-<GEN>-L<level>-Data.db`), a od MANIFEST-a se vodi u njemu.
 
 ### 3.5 Konfiguracija (`config.json`)
 
@@ -267,34 +269,34 @@ Format je **JSON** (`encoding/json` je dozvoljen samo ovde). Ako fajl ne postoji
 
 ```json
 {
-  "blok":         { "velicina_kb": 4, "kes_blokova": 256 },
-  "wal":          { "zapisa_po_segmentu": 100, "blokova_po_segmentu": 16 },
-  "memtable":     { "struktura": "hashmapa", "max_elemenata": 1000, "max_kb": 0, "broj_instanci": 1,
-                    "skiplista_max_visina": 16, "bstablo_red": 4 },
-  "sstable":      { "proredjenost_summary": 5, "bloom_verovatnoca_greske": 0.01 },
-  "kes":          { "max_zapisa": 100 },
-  "lsm":          { "max_nivoa": 4, "algoritam": "size_tiered",
-                    "size_tiered_tabela_za_spajanje": 4,
-                    "leveled_l0_max_tabela": 4, "leveled_l1_max_kb": 1024, "leveled_faktor_rasta": 10,
-                    "hibridni_size_tiered_nivoa": 1 },
-  "token_bucket": { "broj_tokena": 10, "interval_sekundi": 60 },
-  "blob":         { "prag_kb": 64 },
-  "putanje":      { "podaci": "podaci", "checkpoint": "checkpoint", "backup": "backup" }
+  "block":        { "size_kb": 4, "cache_blocks": 256 },
+  "wal":          { "records_per_segment": 100, "blocks_per_segment": 16 },
+  "memtable":     { "structure": "hashmap", "max_records": 1000, "max_kb": 0, "instances": 1,
+                    "skiplist_max_height": 16, "btree_order": 4 },
+  "sstable":      { "summary_sparsity": 5, "bloom_false_positive_rate": 0.01 },
+  "cache":        { "max_records": 100 },
+  "lsm":          { "max_levels": 4, "compaction": "size_tiered",
+                    "size_tiered_tables_to_merge": 4,
+                    "leveled_l0_max_tables": 4, "leveled_l1_max_kb": 1024, "leveled_growth_factor": 10,
+                    "hybrid_size_tiered_levels": 1 },
+  "token_bucket": { "tokens": 10, "interval_seconds": 60 },
+  "blob":         { "threshold_kb": 64 },
+  "paths":        { "data": "data", "checkpoint": "checkpoint", "backup": "backup" }
 }
 ```
 
-Pravila: `max_kb = 0` znači da se Memtable ograničava brojem elemenata, inače zauzećem memorije. `blok.velicina_kb` ∈ {4, 8, 16}. `lsm.algoritam` ∈ {`size_tiered`, `leveled`, `hibridni`}. `memtable.struktura` ∈ {`hashmapa`, `skiplista`, `bstablo`}. `lsm.max_nivoa` ≥ 4 (vežbe 11).
+Pravila: `max_kb = 0` znači da se Memtable ograničava brojem elemenata, inače zauzećem memorije. `block.size_kb` ∈ {4, 8, 16}. `lsm.compaction` ∈ {`size_tiered`, `leveled`, `hybrid`}. `memtable.structure` ∈ {`hashmap`, `skiplist`, `btree`}. `lsm.max_levels` ≥ 4 (vežbe 11).
 
 ### 3.6 Komande u konzoli
 
 ```
-PUT <kljuc> <vrednost>      GET <kljuc>      DELETE <kljuc>      EXIT                     (ocena 6)
-VALIDATE <generacija>                                                                    (ocena 7)
-PREFIX_SCAN <prefiks> <strana> <velicina>    RANGE_SCAN <od> <do> <strana> <velicina>
-PREFIX_ITERATE <prefiks> / RANGE_ITERATE <od> <do>  → zatim NEXT / STOP
-SNAPSHOT ...   CHECKPOINT <ime>                                                          (ocena 9)
-USE <keyspace>   PUT <kljuc> <vrednost> [ttl_sekundi]   BATCH_WRITE ...   DELETE_RANGE <od> <do>
-BACKUP <ime>   BACKUP_INC <ime>   RESTORE <ime>
+PUT <key> <value>      GET <key>      DELETE <key>      EXIT                             (ocena 6)
+VALIDATE <generation>                                                                    (ocena 7)
+PREFIX_SCAN <prefix> <page> <page_size>    RANGE_SCAN <from> <to> <page> <page_size>
+PREFIX_ITERATE <prefix> / RANGE_ITERATE <from> <to>  → zatim NEXT / STOP
+SNAPSHOT ...   CHECKPOINT <name>                                                         (ocena 9)
+USE <keyspace>   PUT <key> <value> [ttl_seconds]   BATCH_WRITE ...   DELETE_RANGE <from> <to>
+BACKUP <name>   BACKUP_INC <name>   RESTORE <name>
 BF_* / CMS_* / HLL_* / SIMHASH_*                                                         (ocena 10)
 ```
 
@@ -308,16 +310,16 @@ Faza = ocena. Faza je gotova kad svi članovi završe svoje korake označene tom
 
 > **Datum odbrane u februarskom roku još nije poznat - kad se sazna, upisati ga ovde i pomeriti rokove.** Do tada su datumi okvirni.
 
-| Faza | Ocena | Specifikacija | Okvirni rok |
-|---|---|---|---|
-| 0 | - | Skelet, zamrznuti ugovori iz sekcije 3, CI, svi umeju da prave grane i PR-ove | 22.11.2026. |
-| 1 | 6 | 1.1, 1.2 (hash mapa), 1.6, 1.3 bez 1.3.5, 2.1, PUT/GET/DELETE | 13.12.2026. |
-| 2 | 7 | 1.3.5, 1.5, 1.2[DZ1], 1.3[DZ1] | 27.12.2026. |
-| 3 | 8 | 2.2, 1.1[DZ1], 1.2[DZ2] | 10.01.2027. |
-| 4 | 9 | 1.4, 1.7.1, 1.7.2, 2.4, 2.5, 1.3[DZ2], 1.3[DZ3] | 24.01.2027. |
-| 5 | 10 | 1.7.3, 1.7.4, 2.3, 2.6, 2.7, 2.8, 2.9, 1.4[DZ1], 1.4[DZ2] | pre odbrane |
+| Faza | Ocena | Tag na `main` | Specifikacija | Okvirni rok |
+|---|---|---|---|---|
+| 0 | - | - | Skelet, zamrznuti ugovori iz sekcije 3, CI, svi umeju da prave grane i PR-ove | 22.11.2026. |
+| 1 | 6 | `jezgro` | 1.1, 1.2 (hash mapa), 1.6, 1.3 bez 1.3.5, 2.1, PUT/GET/DELETE | 13.12.2026. |
+| 2 | 7 | `kes-merkle` | 1.3.5, 1.5, 1.2[DZ1], 1.3[DZ1] | 27.12.2026. |
+| 3 | 8 | `wal-blokovi` | 2.2, 1.1[DZ1], 1.2[DZ2] | 10.01.2027. |
+| 4 | 9 | `lsm-scan` | 1.4, 1.7.1, 1.7.2, 2.4, 2.5, 1.3[DZ2], 1.3[DZ3] | 24.01.2027. |
+| 5 | 10 | `kompletno` | 1.7.3, 1.7.4, 2.3, 2.6, 2.7, 2.8, 2.9, 1.4[DZ1], 1.4[DZ2] | pre odbrane |
 
-Na kraju svake faze: svi koraci faze su u `develop`, ručni test celog toka prolazi, PR `develop → main`, tag `ocena-N`. Ako zaglavimo, poslednji tag je verzija koju branimo.
+Na kraju svake faze: svi koraci faze su u `develop`, ručni test celog toka prolazi, PR `develop → main` i tag sa imenom faze iz tabele (kolona "Tag"). Ako zaglavimo, poslednji tag je verzija koju branimo.
 
 ---
 
@@ -329,10 +331,10 @@ Svaki član ide **odozgo nadole** kroz svoj spisak: prvo lakši koraci, pa teži
 
 | Član | Paketi | Teški algoritamski delovi | Ukupna težina |
 |---|---|---|---|
-| **Andrej** | `lru`, `blokmenadzer`, `engine`, `kes`, `iteratori`, `.github/` | Block manager, engine (read/write path), merge iterator, scan | **19.5** |
-| **Aleksa** | `wal`, `memtable/skiplista`, `kodiranje`, `blob`, `mergeoperatori` | WAL osnovni i blokovski, skip lista, kompresija, BLOB, merge operatori | **20** |
-| **Đole** | `sstable`, `merkle`, `lsm`, `kopije/checkpoint` | SSTable, Merkle stablo, LSM i kompakcije, MANIFEST | **20.5** |
-| **Relja** | `konfiguracija`, `cmd/kvengine`, `bloomfilter`, `memtable` (interfejs, hashmapa, bstablo, menadžer), `tokenbucket`, `probabilisticki`, `kopije` (snapshot, backup) | B stablo, Bloom filter, CountMinSketch, HyperLogLog, SimHash, N Memtable instanci | **19.5** |
+| **Andrej** | `lru`, `blockmanager`, `engine`, `cache`, `iterator`, `.github/` | Block manager, engine (read/write path), merge iterator, scan | **19.5** |
+| **Aleksa** | `wal`, `memtable/skiplist`, `compression`, `blob`, `mergeop` | WAL osnovni i blokovski, skip lista, kompresija, BLOB, merge operatori | **20** |
+| **Đole** | `sstable`, `merkle`, `lsm`, `copies/checkpoint.go` | SSTable, Merkle stablo, LSM i kompakcije, MANIFEST | **20.5** |
+| **Relja** | `config`, `cmd/kvengine`, `bloomfilter`, `memtable` (interfejs, hashmap, btree, menadžer), `tokenbucket`, `probabilistic`, `copies` (snapshot, backup) | B stablo, Bloom filter, CountMinSketch, HyperLogLog, SimHash, N Memtable instanci | **19.5** |
 
 **Faza 0 - svi zajedno (do 22.11.):** Andrej pravi skelet (A1), ostali ga review-uju; svi kloniraju repo, prave granu `feature/<paket>-init`, prvi commit u svom paketu (npr. `doc.go`) i otvaraju PR - provera da Git tok radi kod svih.
 
@@ -340,42 +342,42 @@ Svaki član ide **odozgo nadole** kroz svoj spisak: prvo lakši koraci, pa teži
 
 | # | Ocena | Težina | Korak | Grana | Šta tačno | Zavisi od |
 |---|---|---|---|---|---|---|
-| A1 | 0 | 2 | Skelet repoa | `feature/skelet` | `go.mod`, folderi iz 3.1, interfejsi iz 3.3 (potpisi + prazna tela koja se kompajliraju), `internal/zapis` sa kodiranjem/dekodiranjem i testovima, CI (`go vet`, `go test`), `.gitignore` (`podaci/`, `checkpoint/`, `backup/`) | - |
-| A2 | 6 | 1 | Generički LRU | `feature/lru` | Hash mapa + `container/list` (vežbe 10); `Uzmi`, `Stavi`, `Izbaci`; O(1) operacije | A1 |
-| A3 | 6 | 3 | Block manager + block cache (1.6) | `feature/blok-menadzer` | Blokovi 4/8/16 KB iz konfiguracije; čitanje: prvo cache, pa disk, pa upis u cache; pisanje: disk + ažuriranje cache-a ako je blok tu; `PisacToka`/`CitacToka` | A2 |
-| A4 | 6 | 4 | Engine: write i read path | `feature/engine-jezgro` | `Put/Get/Delete` kroz WAL → Memtable → flush u SSTable; GET kroz Memtable → SSTable-ove od najnovijeg; brisanje WAL segmenata posle flush-a (niska voda); oporavak na startu (WAL → Memtable); `Prostor` i `"default"` keyspace; zabrana `"\x00"` ključeva | A3, L1, D1, R1, R3 |
+| A1 | 0 | 2 | Skelet repoa | `feature/skelet` | `go.mod`, folderi iz 3.1, interfejsi iz 3.3 (potpisi + prazna tela koja se kompajliraju), `internal/record` sa kodiranjem/dekodiranjem i testovima, CI (`go vet`, `go test`), `.gitignore` (`data/`, `checkpoint/`, `backup/`) | - |
+| A2 | 6 | 1 | Generički LRU | `feature/lru` | Hash mapa + `container/list` (vežbe 10); `Get`, `Put`, `Remove`; O(1) operacije | A1 |
+| A3 | 6 | 3 | Block manager + block cache (1.6) | `feature/blok-menadzer` | Blokovi 4/8/16 KB iz konfiguracije; čitanje: prvo cache, pa disk, pa upis u cache; pisanje: disk + ažuriranje cache-a ako je blok tu; `StreamWriter`/`StreamReader` | A2 |
+| A4 | 6 | 4 | Engine: write i read path | `feature/engine-jezgro` | `Put/Get/Delete` kroz WAL → Memtable → flush u SSTable; GET kroz Memtable → SSTable-ove od najnovijeg; brisanje WAL segmenata posle flush-a (niska voda); oporavak na startu (WAL → Memtable); `Keyspace` i `"default"` keyspace; zabrana `"\x00"` ključeva | A3, L1, D1, R1, R3 |
 | A5 | 7 | 1 | Cache zapisa (1.5) | `feature/kes` | LRU nad zapisima posle Memtable-a; PUT/DELETE ažuriraju ili izbacuju ključ (nikad zastarela vrednost); GET sa diska upisuje u cache | A4 |
 | A6 | 8 | 2.5 | Merge iterator | `feature/merge-iterator` | Spaja više `Iterator`-a (Memtable + SSTable-ovi) u jedan sortiran tok; za isti ključ pobeđuje najnoviji; osnova za kompakciju (D5) i scan (A7) | D4 |
 | A7 | 9 | 2.5 | PREFIX_SCAN / RANGE_SCAN (2.4) | `feature/scan` | Preko merge iteratora; pozicioniranje preko Summary/Index na prvi kandidat ključ; paginacija (strana, veličina); preskakanje tombstone i sistemskih ključeva; **algoritam u README-u** | A6 |
 | A8 | 9 | 1.5 | PREFIX_ITERATE / RANGE_ITERATE (2.5) | `feature/iteratori` | Interaktivni NEXT/STOP nad istim mehanizmom kao A7; **algoritam u README-u** | A7 |
-| A9 | 10 | 2 | Keyspace-ovi (2.9) | `feature/keyspace` | `USE <keyspace>` i keyspace parametar u svim operacijama; zasebne komponente po prostoru; prostori se otkrivaju iz `podaci/` na startu | A8 |
+| A9 | 10 | 2 | Keyspace-ovi (2.9) | `feature/keyspace` | `USE <keyspace>` i keyspace parametar u svim operacijama; zasebne komponente po prostoru; prostori se otkrivaju iz `data/` na startu | A8 |
 
 ### 5.2 Aleksa - ukupno 20
 
 | # | Ocena | Težina | Korak | Grana | Šta tačno | Zavisi od |
 |---|---|---|---|---|---|---|
-| L1 | 6 | 3 | WAL osnovni (1.1) | `feature/wal` | Segmenti sa fiksnim brojem zapisa (`wal_0001.log`…); format iz 3.2; CRC provera pri čitanju; čitanje blok po blok preko Block managera; brisanje segmenata do niske vode; test oporavka posle "pada" | A1 (za testove do A3: jednostavna zamena za `BlokMenadzer`) |
+| L1 | 6 | 3 | WAL osnovni (1.1) | `feature/wal` | Segmenti sa fiksnim brojem zapisa (`wal_0001.log`…); format iz 3.2; CRC provera pri čitanju; čitanje blok po blok preko Block managera; brisanje segmenata do niske vode; test oporavka posle "pada" | A1 (za testove do A3: jednostavna zamena za `BlockManager`) |
 | L2 | 7 | 2 | Memtable skip lista (1.2[DZ1]) | `feature/memtable-skiplista` | Implementira `Memtable` interfejs (vežbe 5); maksimalna visina iz konfiguracije | R3 |
-| L3 | 8 | 3.5 | WAL blokovski (1.1[DZ1]) | `feature/wal-blokovi` | Segment fiksne dužine u blokovima; fragmentacija FULL/FIRST/MIDDLE/LAST; padding; trailing canary; `Sinhronizuj` (fdatasync na Linux-u, `File.Sync()` na Windows-u); upisati konačan format u 3.2 | L1 |
+| L3 | 8 | 3.5 | WAL blokovski (1.1[DZ1]) | `feature/wal-blokovi` | Segment fiksne dužine u blokovima; fragmentacija FULL/FIRST/MIDDLE/LAST; padding; trailing canary; `Sync` (fdatasync na Linux-u, `File.Sync()` na Windows-u); upisati konačan format u 3.2 | L1 |
 | L4 | 9 | 3 | Kompresovani format data bloka (1.3[DZ3]) | `feature/kodiranje` | Varint za sva numerička polja (`binary.PutUvarint`/`PutVarint`); delta enkoding ključeva; dictionary/bit packing gde ima smisla (**obrazloženje izbora u README-u**); zamena u SSTable-u (sa Đoletom) | D1 |
 | L5 | 9 | 1.5 | Data block hash index (1.3[DZ2]) | `feature/hash-index-bloka` | Hash index unutar data bloka za brže nalaženje ključa u bloku | L4 |
-| L6 | 10 | 2 | BATCH_WRITE / DELETE_RANGE (2.6) | `feature/batch` | Transakciono: ceo batch je jedan atomičan upis u WAL (`Dodaj(zapisi...)`); posle pada se oporavlja ceo batch ili ništa; DELETE_RANGE nalazi ključeve u opsegu (preko A6/A7) i upisuje tombstone-ove kao jedan batch | L3, A7 |
-| L7 | 10 | 2.5 | BLOB (2.8) | `feature/blob` | Vrednost veća od `blob.prag_kb` ide u zaseban fajl (preko Block managera), a Data čuva referencu (`TipBlobReferenca`); GET razrešava referencu; kompakcija briše BLOB-ove na koje više niko ne pokazuje (sa Đoletom) | D5 |
-| L8 | 10 | 2.5 | Merge operatori za BF/CMS/HLL (2.3) | `feature/merge-operatori` | Dodavanje elementa ne čita prethodno stanje, nego upisuje samo operaciju (`TipMergeOperacija`); čitanje skuplja sve operacije za taj ključ sa svih nivoa i primenjuje ih na strukturu (Reljine strukture iz R8); ponašanje kompakcije prema merge zapisima (sa Đoletom: sme da ih spoji u jedno stanje); parametri i hash funkcije u meta bloku SSTable-a (sa Đoletom) | R8, D5 |
+| L6 | 10 | 2 | BATCH_WRITE / DELETE_RANGE (2.6) | `feature/batch` | Transakciono: ceo batch je jedan atomičan upis u WAL (`Append(records...)`); posle pada se oporavlja ceo batch ili ništa; DELETE_RANGE nalazi ključeve u opsegu (preko A6/A7) i upisuje tombstone-ove kao jedan batch | L3, A7 |
+| L7 | 10 | 2.5 | BLOB (2.8) | `feature/blob` | Vrednost veća od `blob.threshold_kb` ide u zaseban fajl (preko Block managera), a Data čuva referencu (`TypeBlobReference`); GET razrešava referencu; kompakcija briše BLOB-ove na koje više niko ne pokazuje (sa Đoletom) | D5 |
+| L8 | 10 | 2.5 | Merge operatori za BF/CMS/HLL (2.3) | `feature/merge-operatori` | Dodavanje elementa ne čita prethodno stanje, nego upisuje samo operaciju (`TypeMergeOperation`); čitanje skuplja sve operacije za taj ključ sa svih nivoa i primenjuje ih na strukturu (Reljine strukture iz R8); ponašanje kompakcije prema merge zapisima (sa Đoletom: sme da ih spoji u jedno stanje); parametri i hash funkcije u meta bloku SSTable-a (sa Đoletom) | R8, D5 |
 
 ### 5.3 Đole - ukupno 20.5
 
 | # | Ocena | Težina | Korak | Grana | Šta tačno | Zavisi od |
 |---|---|---|---|---|---|---|
-| D1 | 6 | 4.5 | SSTable (1.3.1-1.3.4) | `feature/sstable` | Data, Filter (Bloom), Index, Summary sa min/max ključem, TOC (vežbe 9); `Napravi`, `Otvori`, `Nadji`; sve preko `PisacToka`/`CitacToka`, nikad ceo fajl u memoriji; kodiranje zapisa na jednom mestu (vidi 3.2) | A1, R2 (za testove do A3: jednostavna zamena za `BlokMenadzer`) |
-| D2 | 7 | 0.5 | Proređenost Summary-ja (1.3[DZ1]) | `feature/summary-proredjenost` | `proredjenost_summary` iz konfiguracije (npr. 5 = svaki 5. zapis iz Indexa ide u Summary) | D1 |
-| D3 | 7 | 2.5 | Merkle stablo (1.3.5) | `feature/merkle` | Stablo nad vrednostima iz Data; serijalizacija u Metadata fajl (po nivoima, vežbe 8); komanda `VALIDATE <generacija>` ponovo gradi stablo iz Data i javlja **da li i koji zapisi** su izmenjeni | D1 |
-| D4 | 8 | 1.5 | SSTable iterator | `feature/sstable-iterator` | `Tabela.Iterator(odKljuca)` čita blok po blok; pozicioniranje preko Summary/Index; osnova za merge iterator (A6) i kompakcije | D2 |
-| D5 | 9 | 5 | LSM stablo + size-tiered i leveled kompakcija (1.4) | `feature/lsm` | Za svaku tabelu poznat nivo; `max_nivoa` iz konfiguracije; oba algoritma sa parametrima iz konfiguracije; lančane kompakcije (nivo i može da pokrene nivo i+1); spajanje preko merge iteratora (A6); izbacivanje zastarelih verzija; tombstone se izbacuje tek na poslednjem nivou; redosled pretrage tabela na read path-u za oba algoritma | D4, A6 |
-| D6 | 9 | 1 | Checkpoint (1.7.2) | `feature/checkpoint` | Flush Memtable-a, pa hard linkovi (`os.Link`) ka svim tabelama (i MANIFEST-u, kad postoji) u `checkpoint/<ime>/` | D5 |
-| D7 | 10 | 1.5 | Hibridna kompakcija (1.4[DZ1]) | `feature/lsm-hibrid` | Prvih `hibridni_size_tiered_nivoa` nivoa size-tiered, ostali leveled | D5 |
+| D1 | 6 | 4.5 | SSTable (1.3.1-1.3.4) | `feature/sstable` | Data, Filter (Bloom), Index, Summary sa min/max ključem, TOC (vežbe 9); `Create`, `Open`, `Get`; sve preko `StreamWriter`/`StreamReader`, nikad ceo fajl u memoriji; kodiranje zapisa na jednom mestu (vidi 3.2) | A1, R2 (za testove do A3: jednostavna zamena za `BlockManager`) |
+| D2 | 7 | 0.5 | Proređenost Summary-ja (1.3[DZ1]) | `feature/summary-proredjenost` | `summary_sparsity` iz konfiguracije (npr. 5 = svaki 5. zapis iz Indexa ide u Summary) | D1 |
+| D3 | 7 | 2.5 | Merkle stablo (1.3.5) | `feature/merkle` | Stablo nad vrednostima iz Data; serijalizacija u Metadata fajl (po nivoima, vežbe 8); komanda `VALIDATE <generation>` ponovo gradi stablo iz Data i javlja **da li i koji zapisi** su izmenjeni | D1 |
+| D4 | 8 | 1.5 | SSTable iterator | `feature/sstable-iterator` | `Table.Iterator(fromKey)` čita blok po blok; pozicioniranje preko Summary/Index; osnova za merge iterator (A6) i kompakcije | D2 |
+| D5 | 9 | 5 | LSM stablo + size-tiered i leveled kompakcija (1.4) | `feature/lsm` | Za svaku tabelu poznat nivo; `max_levels` iz konfiguracije; oba algoritma sa parametrima iz konfiguracije; lančane kompakcije (nivo i može da pokrene nivo i+1); spajanje preko merge iteratora (A6); izbacivanje zastarelih verzija; tombstone se izbacuje tek na poslednjem nivou; redosled pretrage tabela na read path-u za oba algoritma | D4, A6 |
+| D6 | 9 | 1 | Checkpoint (1.7.2) | `feature/checkpoint` | Flush Memtable-a, pa hard linkovi (`os.Link`) ka svim tabelama (i MANIFEST-u, kad postoji) u `checkpoint/<name>/` | D5 |
+| D7 | 10 | 1.5 | Hibridna kompakcija (1.4[DZ1]) | `feature/lsm-hibrid` | Prvih `hybrid_size_tiered_levels` nivoa size-tiered, ostali leveled | D5 |
 | D8 | 10 | 2.5 | MANIFEST (1.4[DZ2]) | `feature/manifest` | MANIFEST beleži svaku promenu LSM stabla (nova tabela, kompakcija, brisanje); oporavak LSM stabla iz MANIFEST-a na startu; nivo se više ne čita iz imena fajla | D7 |
-| D9 | 10 | 1.5 | TTL (2.7) | `feature/ttl` | TTL za jedan ključ ili grupu ključeva (polje `Istice`, `PUT ... [ttl_sekundi]`); GET/scan/iterate ne vraćaju istekle zapise (izmena u engine-u i scan-u u dogovoru sa Andrejem); kompakcija ih fizički uklanja | D5, A7 |
+| D9 | 10 | 1.5 | TTL (2.7) | `feature/ttl` | TTL za jedan ključ ili grupu ključeva (polje `ExpiresAt`, `PUT ... [ttl_seconds]`); GET/scan/iterate ne vraćaju istekle zapise (izmena u engine-u i scan-u u dogovoru sa Andrejem); kompakcija ih fizički uklanja | D5, A7 |
 
 ### 5.4 Relja - ukupno 19.5
 
@@ -383,13 +385,13 @@ Svaki član ide **odozgo nadole** kroz svoj spisak: prvo lakši koraci, pa teži
 |---|---|---|---|---|---|---|
 | R1 | 6 | 2.5 | Konfiguracija (2.1) + CLI | `feature/konfiguracija-cli` | Učitavanje `config.json`, default vrednosti u kodu, validacija pri pokretanju; CLI petlja sa PUT/GET/DELETE/EXIT; mehanizam da drugi lako dodaju svoje komande | A1 |
 | R2 | 6 | 1.5 | Bloom filter | `feature/bloom-filter` | Parametri iz očekivanog broja elemenata i verovatnoće greške (vežbe 4); ručna serijalizacija; koristi ga D1 i tip BloomFilter (R8) | A1 |
-| R3 | 6 | 1 | Memtable hash mapa (1.2) | `feature/memtable-hashmapa` | Interfejs `Memtable`; hash mapa; ograničenje po broju elemenata ili KB; `SortiraniZapisi` za flush | A1 |
-| R4 | 7 | 3 | Memtable B stablo + izbor strukture (1.2[DZ1]) | `feature/memtable-bstablo` | Implementira `Memtable` (vežbe 6); red stabla iz konfiguracije; `memtable.struktura` bira hashmapu, skip listu ili B stablo | R3 |
+| R3 | 6 | 1 | Memtable hash mapa (1.2) | `feature/memtable-hashmapa` | Interfejs `Memtable`; hash mapa; ograničenje po broju elemenata ili KB; `SortedRecords` za flush | A1 |
+| R4 | 7 | 3 | Memtable B stablo + izbor strukture (1.2[DZ1]) | `feature/memtable-bstablo` | Implementira `Memtable` (vežbe 6); red stabla iz konfiguracije; `memtable.structure` bira `hashmap`, `skiplist` ili `btree` | R3 |
 | R5 | 8 | 1.5 | Token Bucket (2.2) | `feature/token-bucket` | Broj tokena i interval iz konfiguracije (vežbe 12); stanje (timestamp poslednjeg resetovanja + broj tokena) ručno serijalizovano kao zapis pod `"\x00sys/token_bucket"`; provera pre svake korisničke operacije; odbijen zahtev vraća poruku; korisnik ne vidi i ne menja taj zapis | A4 |
 | R6 | 8 | 2 | N Memtable instanci (1.2[DZ2]) | `feature/memtable-instance` | 1 read-write + N-1 read-only; kad se RW napuni postaje RO; flush kad se popune sve; GET od najnovije ka najstarijoj; WAL segmenti se brišu tek kad je njihov sadržaj flush-ovan (sa Aleksom i Andrejem) | R4 |
 | R7 | 9 | 1.5 | Snapshot (1.7.1) | `feature/snapshot` | Čitanje vrednosti pod ključem kroz vreme, samo u memoriji (tumačenje potvrditi - sekcija 8) | R6 |
 | R8 | 10 | 2.5 | Probabilistički tipovi (2.3): CountMinSketch, HyperLogLog, SimHash + komande | `feature/probabilisticki` | Strukture (vežbe 4 i 5) sa ručnom serijalizacijom i funkcijom za primenu jedne operacije (koristi je Aleksin merge operator, L8); komande BF/CMS/HLL/SIMHASH iz 3.6 (kreiranje, brisanje, dodavanje, upit); čuvaju se kao sistemski zapisi; SimHash čuva fingerprint i računa Hamingovu udaljenost. **Prvi korak u fazi 10**, jer L8 zavisi od njega | R2, A4 |
-| R9 | 10 | 2 | Backup (1.7.3) + RESTORE | `feature/backup` | Kopira ceo sadržaj u `backup/<ime>/` (kopiranje sadržaja preko Block managera); RESTORE iz izabranog backup-a | D6 |
+| R9 | 10 | 2 | Backup (1.7.3) + RESTORE | `feature/backup` | Kopira ceo sadržaj u `backup/<name>/` (kopiranje sadržaja preko Block managera); RESTORE iz izabranog backup-a | D6 |
 | R10 | 10 | 2 | Inkrementalni backup (1.7.4) | `feature/backup-inkrementalni` | Kopira samo fajlove nastale/izmenjene posle prethodnog backup-a (SSTable-ovi su nepromenljivi, pa je dovoljno pratiti koje generacije su već kopirane); RESTORE iz lanca backup-a | R9, D8 |
 
 ### 5.5 Pregled: težina po fazama
@@ -436,11 +438,11 @@ Rotacija se pomera za jedno mesto na početku svake faze, da bi svako tokom proj
 Oznake: `[ ]` nije počelo · `[~]` u toku · `[x]` u `develop`
 
 - **Faza 0:** [ ] A1 · [ ] svi: init grane
-- **Ocena 6:** [ ] A2 · [ ] A3 · [ ] A4 · [ ] L1 · [ ] D1 · [ ] R1 · [ ] R2 · [ ] R3 · [ ] tag `ocena-6`
-- **Ocena 7:** [ ] A5 · [ ] L2 · [ ] D2 · [ ] D3 · [ ] R4 · [ ] tag `ocena-7`
-- **Ocena 8:** [ ] A6 · [ ] L3 · [ ] D4 · [ ] R5 · [ ] R6 · [ ] tag `ocena-8`
-- **Ocena 9:** [ ] A7 · [ ] A8 · [ ] L4 · [ ] L5 · [ ] D5 · [ ] D6 · [ ] R7 · [ ] tag `ocena-9`
-- **Ocena 10:** [ ] A9 · [ ] L6 · [ ] L7 · [ ] L8 · [ ] D7 · [ ] D8 · [ ] D9 · [ ] R8 · [ ] R9 · [ ] R10 · [ ] tag `ocena-10`
+- **Ocena 6:** [ ] A2 · [ ] A3 · [ ] A4 · [ ] L1 · [ ] D1 · [ ] R1 · [ ] R2 · [ ] R3 · [ ] tag `jezgro`
+- **Ocena 7:** [ ] A5 · [ ] L2 · [ ] D2 · [ ] D3 · [ ] R4 · [ ] tag `kes-merkle`
+- **Ocena 8:** [ ] A6 · [ ] L3 · [ ] D4 · [ ] R5 · [ ] R6 · [ ] tag `wal-blokovi`
+- **Ocena 9:** [ ] A7 · [ ] A8 · [ ] L4 · [ ] L5 · [ ] D5 · [ ] D6 · [ ] R7 · [ ] tag `lsm-scan`
+- **Ocena 10:** [ ] A9 · [ ] L6 · [ ] L7 · [ ] L8 · [ ] D7 · [ ] D8 · [ ] D9 · [ ] R8 · [ ] R9 · [ ] R10 · [ ] tag `kompletno`
 
 ---
 
